@@ -29,7 +29,7 @@ bayesian_fit <- function(
   vars, results, W, dates_len,
   lag_X = TRUE, tfe = TRUE, cfe = TRUE, tfe_idx = NULL,
   n_draws = 1000) {
-  
+
   beta_post <- results$beta_post
   rho_post <- results$rho_post
 
@@ -45,19 +45,31 @@ bayesian_fit <- function(
     
     X_beta <- (1 * beta_post_draw[1] + # Constant
                  x[, -1] %*% beta_post_draw[2:(ncol(x))] + # X \beta
-                 W %*% x[, -1] %*% 
-                 beta_post_draw[(1 + ncol(x)):(2 * ncol(x) - 1)]) # WX \theta
+                 if(lag_X) {W %*% x[, -1] %*% # WX \theta
+                 beta_post_draw[(1 + ncol(x)):(2 * ncol(x) - 1)]} else {0}) 
     if(tfe) {X_beta <- X_beta + 
       if(is.null(tfe_idx)) {
-        mean(beta_post_draw[(2 * ncol(x)):(2 * ncol(x) + dates_len - 2)])
-        # beta_post_draw[(2 * ncol(x) + dates_len - 2)] # Option 2
+        if(lag_X) {
+          mean(beta_post_draw[(2 * ncol(x)):(2 * ncol(x) + dates_len - 2)])
+          # beta_post_draw[(2 * ncol(x) + dates_len - 2)] # Option 2
+        } else {
+          mean(beta_post_draw[(1 + ncol(x)):(1 + ncol(x) + dates_len - 2)])
+        }
       } else {
-        c(0, beta_post_draw[(2 * ncol(x)):(2 * ncol(x) + dates_len - 2)])[tfe_idx]
+        if(lag_X) {
+          c(0, beta_post_draw[(2 * ncol(x)):(2 * ncol(x) + dates_len - 2)])[tfe_idx]
+        } else {
+          c(0, beta_post_draw[(1 + ncol(x)):(1 + ncol(x) + dates_len - 2)])[tfe_idx]
+        }
       }
     }
     if(cfe) {
       X_beta <- X_beta + 
-        c(0, beta_post_draw[(2 * ncol(x) + dates_len - 1):len(beta_post_draw)])
+        if(lag_X) {
+          c(0, beta_post_draw[(2 * ncol(x) + dates_len - 1):length(beta_post_draw)])
+        } else {
+          c(0, beta_post_draw[(2 * ncol(x) + 1):length(beta_post_draw)])
+        }
     }
     
     y_pred[, i] <- (A_inv %*% X_beta)[, 1]
@@ -66,6 +78,40 @@ bayesian_fit <- function(
   return(y_pred)
 }
 
+bayesian_fit2 <- function(
+  x, 
+  vars, results, dates_len,
+  tfe = TRUE, cfe = TRUE, tfe_idx = NULL,
+  n_draws = 1000) {
+  
+  beta_post <- results$beta_post
+
+  y_pred <- matrix(NA, nrow = nrow(x), ncol = n_draws)
+  rnd <- sample(seq(1, dim(beta_post)[2]), replace = TRUE, n_draws)
+  
+  for(i in 1:n_draws) {
+    beta_post_draw <- beta_post[, rnd[i]]
+
+    X_beta <- (1 * beta_post_draw[1] + # Constant
+                 x[, -1] %*% beta_post_draw[2:(ncol(x))]) # X \beta
+    if(tfe) {X_beta <- X_beta + 
+      if(is.null(tfe_idx)) {
+        mean(beta_post_draw[(1 + ncol(x)):(1 + ncol(x) + dates_len - 2)])
+        # beta_post_draw[(2 * ncol(x) + dates_len - 2)] # Option 2
+      } else {
+        c(0, beta_post_draw[(1 + ncol(x)):(1 + ncol(x) + dates_len - 2)])[tfe_idx]
+      }
+    }
+    if(cfe) {
+      X_beta <- X_beta + 
+        c(0, beta_post_draw[(2 * ncol(x) + 1):length(beta_post_draw)])
+    }
+    
+    y_pred[, i] <- X_beta[, 1]
+  }
+  
+  return(y_pred)
+}
 
 plm_fit <- function(x, results, tfe, cfe, tfe_idx = NULL) {
   
@@ -163,6 +209,8 @@ sm_results <- function(x) {
 
 bayesian_t <- function(x, ps = c(0.99, 0.95, 0.9)) {
   
+  if(is.null(x$direct_post)) {return(bayesian_t.betas(x, ps))}
+  
   directs <- matrix(NA, nrow = length(ps), ncol = dim(x$direct_post)[1] - 1)
   for(i in seq_along(ps)) {
     directs[i, ] <- apply(get_hpdi(x$direct_post[-1, ], ps[i]), 1,
@@ -187,6 +235,29 @@ bayesian_t <- function(x, ps = c(0.99, 0.95, 0.9)) {
   list("direct_p" = !directs, "indirect_p" = !indirects, "rhos" = !rhos)
 }
 
+bayesian_t.betas <- function(x, ps = c(0.99, 0.95, 0.9)) {
+  
+  betas <- matrix(NA, nrow = length(ps), ncol = length(x$variables))
+  for(i in seq_along(ps)) {
+    betas[i, ] <- apply(get_hpdi(x$beta_post[seq(2, length(x$variables) + 1), ],
+                                 ps[i]), 1, function(x) {0 > x[1] & 0 < x[2]})
+  }
+  dimnames(betas) <- list(ps)
+  out <- list("beta_p" = ! betas)
+  
+  if(!is.null(x$rho_post)) {
+    rhos <- vector("logical", length(ps))
+    for(i in seq_along(ps)) {
+      tmp <- get_hpdi(x$rho_post, ps[i])
+      rhos[i] <- 0 > tmp[1] & 0 < tmp[2]
+    }
+    names(rhos) <- ps
+    out$rhos <- !rhos
+  }
+  
+  out
+}
+
 
 get_hpdi <- function(x, p = 0.95) {
   
@@ -206,44 +277,126 @@ print_vars <- function(x) {
 ssr <- function(x, y, ...) {round(sum((x - y)^2), 3)}
 
 
-rmse <- function(x, y, N = len(x)) {round(sqrt(sum(x - y)^2 / N), 3)}
+rmse <- function(x, y, N = length(x)) {round(sqrt(sum(x - y)^2 / N), 3)}
 
 
-table_ise <- function(x, vars, stars = TRUE) {
+table_ise <- function(x, W, vars, stars = TRUE) {
   
   if(is(x, "plm")) return(table_ise.plm(x, vars, stars))
   if(is(x, "splm")) return(table_ise.splm(x, vars, stars))
+  # SEM and CLM in Bayesian fashion
+  if(is.null(x$direct_post)) {return(table_ise.betas(x, vars = x$variables, stars))}
+  vars = x$variables
+
+  # Crappy LeSage
+  # t1 <- ifelse(abs(t1) > 2.576, " ***", 
+  #              ifelse(abs(t1) > 1.96, " **",
+  #                     ifelse(abs(t1) > 1.645, " *", "")))
+  # t2 <- ifelse(abs(t2) > 2.576, " ***", 
+  #              ifelse(abs(t2) > 1.96, " **",
+  #                     ifelse(abs(t2) > 1.645, " *", "")))
   
-  t1 <- c(x$res_effects[-1, "direct_t"], mean(x$rho_post) / sd(x$rho_post))
-  t2 <- c(x$res_effects[-1, "indirect_t"])
+  # Dank HPDI
+  b_t <- bayesian_t(x)
+  t1 <- colSums(b_t$direct_p)
+  t2 <- colSums(b_t$indirect_p)
+  t1 <- c(t1, sum(b_t$rhos))
+  
   if(stars) {
-    # Crappy LeSage
-    # t1 <- ifelse(abs(t1) > 2.576, " ***", 
-    #              ifelse(abs(t1) > 1.96, " **",
-    #                     ifelse(abs(t1) > 1.645, " *", "")))
-    # t2 <- ifelse(abs(t2) > 2.576, " ***", 
-    #              ifelse(abs(t2) > 1.96, " **",
-    #                     ifelse(abs(t2) > 1.645, " *", "")))
-    
-    # Dank HPDI
-    b_t <- bayesian_t(x)
-    
     star <- c("3" = " ***", "2" = " **", "1" = " *", "0" = "")
-    
-    t1 <- star[as.character(colSums(b_t$direct_p))]
-    t2 <- star[as.character(colSums(b_t$indirect_p))]
-    
-    # Add rho to directs
+    t1 <- star[as.character(t1)]
+    t2 <- star[as.character(t2)]
+  }
+  
+  # Check if there's thetas involved
+  W <- kronecker(diag(dates_len), W)
+  matr <- get_matr(data, variables[[counter]], dates = dates)
+  y <- matr[, 1]
+  X <- cbind(1, matr[, -1])
+  lag_X <- dim(x$beta_post)[1] > nrow(X) / dates_len + dates_len + length(vars) - 1
+  if(lag_X) {X <- cbind(X, W %*% matr[, -1])}
+  TFE <- kronecker(diag(dates_len), matrix(1, nrow(X) / dates_len, 1))
+  X <- cbind(X, TFE[, -1])
+  CFE <- kronecker(matrix(1, dates_len, 1), diag(nrow(X) / dates_len))
+  X <- cbind(X, CFE[, -1])
+  
+  resid <- (diag(x$N) - median(x$rho_post) * W) %*% y - 
+    (X %*% apply(x$beta_post, 1, median))
+  
+  RMSE_p <- sqrt(crossprod(resid) / x$N)
+  RMSE_d <- mean(x$rmse_post)
+  
+  BIC <- -2 * mean(x$ll) + log(x$N) * (ncol(X + 1))
+  AIC <- -2 * mean(x$ll) + 2 * (ncol(X + 1))
+  
+  tmp <- apply(x$beta_post, 2, function(y, b) {sum(abs(y - b))}, b = apply(x$beta_post, 1, mean))
+  tmp <- tmp + abs(x$rho_post - mean(x$rho_post))
+  ll_m <- x$ll[which(tmp == min(tmp))]
+  
+  DIC <- -2 * ll_m + 4 * (ll_m - mean(x$ll))
+
+  t_WAIC <- -mean(x$ll)
+  v_WAIC <- sum((x$ll - mean(x$ll)) ^ 2)
+  WAIC <- t_WAIC + v_WAIC / x$N
+  # p_WAIC <- sum((x$ll - mean(x$ll)) ^ 2) / (length(x$ll) - 1)
+  # elppd <- lppd - p_WAIC
+  
+  data.frame(
+    "variables" = c(vars, "Rho", "R2", "RMSE_p", "RMSE_d", "BIC", "AIC", "DIC", "WAIC"),
+    "direct" = round(c(x$res_effects[-1, "direct"], 
+                       mean(x$rho_post), x$res_other[1, 2], 
+                       RMSE_p, RMSE_d, BIC, AIC, DIC, WAIC), 3),
+    "direct_t" = c(t1, NA, NA, NA, NA, NA, NA, NA),
+    "indirect" = round(c(x$res_effects[-1, "indirect"], NA, NA, NA, NA, NA, NA, NA, NA), 3),
+    "indirect_t" = c(t2, NA, NA, NA, NA, NA, NA, NA, NA)
+  )
+}
+
+table_ise.betas <- function(x, vars = x$variables, stars = TRUE) {
+  
+  b_t <- bayesian_t(x)
+  
+  star <- c("3" = " ***", "2" = " **", "1" = " *", "0" = "")
+  
+  t1 <- star[as.character(colSums(b_t$beta))]
+  if(!is.null(x$rho_post)) {
     t1 <- c(t1, star[as.character(sum(b_t$rhos))])
   }
   
+  matr <- get_matr(data, variables[[counter]], dates = dates)
+  y <- matr[, 1]
+  X <- cbind(1, matr[, -1])
+  TFE <- kronecker(diag(dates_len), matrix(1, nrow(X) / dates_len, 1))
+  X <- cbind(X, TFE[, -1])
+  CFE <- kronecker(matrix(1, dates_len, 1), diag(nrow(X) / dates_len))
+  X <- cbind(X, CFE[, -1])
+  
+  resid <- y - (X %*% apply(x$beta_post, 1, median))
+  
+  RMSE_p <- sqrt(crossprod(resid) / x$N)
+  RMSE_d <- mean(x$rmse_post)
+  
+  BIC <- -2 * mean(x$ll) + log(x$N) * (ncol(X + 1))
+  AIC <- -2 * mean(x$ll) + 2 * (ncol(X + 1))
+  
+  tmp <- apply(x$beta_post, 2, function(y, b) {sum(abs(y - b))}, b = apply(x$beta_post, 1, mean))
+  ll_m <- x$ll[which(tmp == min(tmp))]
+  
+  DIC <- -2 * ll_m + 4 * (ll_m - mean(x$ll))
+  
+  t_WAIC <- -mean(x$ll)
+  v_WAIC <- sum((x$ll - mean(x$ll)) ^ 2)
+  WAIC <- t_WAIC + v_WAIC / x$N
+  
+  
   data.frame(
-    "variables" = c(vars[-1], "Rho", "R2", "SSR"),
-    "direct" = round(c(x$res_effects[-1, "direct"], 
-                       mean(x$rho_post), x$res_other[1, 2], x$ssr[1,1]), 3),
-    "direct_t" = c(t1, NA, NA),
-    "indirect" = round(c(x$res_effects[-1, "indirect"], NA, NA, NA), 3),
-    "indirect_t" = c(t2, NA, NA, NA)
+    "variables" = c(vars, if(!is.null(x$rho_post)) {"Rho"} else {NA}, 
+                    "R2", "RMSE_p", "RMSE_d", "BIC", "AIC", "DIC", "WAIC"),
+    "beta" = round(c(x$res_effects[-1, "beta"], 
+                     if(!is.null(x$rho_post)) {mean(x$rho_post)} else {NA}, 
+                     x$res_other[1, 2], RMSE_p, RMSE_d,
+                     BIC, AIC, DIC, WAIC), 3),
+    "value_t" = c(t1, NA, NA, if(is.null(x$rho_post)) {NA}, NA, NA, NA, NA, NA)
   )
 }
 
@@ -284,4 +437,55 @@ table_ise.splm <- function(x, vars, stars = TRUE) {
                       x$coefficients[1], y$rsqr, y$tss), 3),
     "value_t" = c(t1, NA, NA)
   )
+}
+
+
+get_hpdis <- function(x, ps = c(0.99, 0.95, 0.9)) {
+  
+  if(is.null(x$direct_post)) { # SEM & CLM
+    betas <- matrix(NA, nrow = length(ps) * 2 + 1, ncol = length(x$variables))
+    for(i in seq_along(ps)) {
+      betas[c(i, nrow(betas) - i + 1), ] <- 
+        t(get_hpdi(x$beta_post[seq(2, length(x$variables) + 1), ], ps[i]))
+    }
+    betas[length(ps) + 1, ] <- 
+      t(get_hpdi(x$beta_post[seq(2, length(x$variables) + 1), ], 0))[1, ]
+    rownames(betas) <- c(ps, 0.5, 1 - rev(ps))
+    
+    out <- list("betas" = betas)
+    
+    if(!is.null(x$rho_post)) {
+      rhos <- matrix(NA, nrow = length(ps) * 2 + 1, ncol = 1)
+      for(i in seq_along(ps)) {
+        rhos[c(i, nrow(rhos) - i + 1), ] <- t(get_hpdi(x$rho_post, ps[i]))
+      }
+      rhos[length(ps) + 1, ] <- t(get_hpdi(x$rho_post, 0))[1, ]
+      rownames(rhos) <- c(ps, 0.5, 1 - rev(ps))
+      out$rhos <- rhos
+    }
+    return(out)
+  }
+  
+  directs <- matrix(NA, nrow = length(ps) * 2 + 1, ncol = dim(x$direct_post)[1] - 1)
+  for(i in seq_along(ps)) {
+    directs[c(i, nrow(directs) - i + 1), ] <- t(get_hpdi(x$direct_post[-1, ], ps[i]))
+  }
+  directs[length(ps) + 1, ] <- t(get_hpdi(x$direct_post[-1, ], 0))[1, ]
+  
+  indirects <- matrix(NA, nrow = length(ps) * 2 + 1, ncol = dim(x$indirect_post)[1] - 1)
+  for(i in seq_along(ps)) {
+    indirects[c(i, nrow(indirects) - i + 1), ] <- t(get_hpdi(x$indirect_post[-1, ], ps[i]))
+  }
+  indirects[length(ps) + 1, ] <- t(get_hpdi(x$indirect_post[-1, ], 0))[1, ]
+  
+  rhos <- matrix(NA, nrow = length(ps) * 2 + 1, ncol = 1)
+  for(i in seq_along(ps)) {
+    rhos[c(i, nrow(rhos) - i + 1), ] <- t(get_hpdi(x$rho_post, ps[i]))
+  }
+  rhos[length(ps) + 1, ] <- t(get_hpdi(x$rho_post, 0))[1, ]
+  
+  rownames(directs) <- rownames(indirects) <- rownames(rhos) <- c(ps, 0.5, 1 - rev(ps))
+  
+  out <- list("directs" = directs, "indirects" = indirects, "rhos" = rhos)
+  return(out)
 }

@@ -2,4 +2,6 @@
 
 ## Evidence from the Brazilian Amazon
 
-Replication files for the paper. *Please note that the files for full Bayesian estimation, while final, are not yet fully documented*.    
+Code accompanying the paper by Kuschnig, Crespo Cuaresma and Krisztin, available as a preprint on [Researchgate](https://dx.doi.org/10.13140/RG.2.2.12119.83362/1). Follow the [FINEPRINT](https://www.fineprint.global/) project for updates on similar research.
+
+Follow the file `main.R` to reproduce the results. Please submit an issue if you stumble upon a problem or have a question.
